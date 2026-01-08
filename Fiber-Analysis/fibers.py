@@ -9,6 +9,7 @@ import math
 from skimage.filters import frangi
 from skimage.morphology import skeletonize
 from skimage.measure import label, regionprops
+import time
 
 # Load the .env
 load_dotenv()
@@ -128,6 +129,7 @@ if check_password():
 
     if uploaded_file is not None:
         with st.spinner('Processing fibers...'):
+            start = time.time()
             skeleton_final, fibers, img_original = process_fiber_image(uploaded_file.read())
             
             # Prepare Visualizations
@@ -164,8 +166,10 @@ if check_password():
             with col2:
                 st.subheader("Highlighted Fiber View")
                 st.image(highlight_vis, use_container_width=True)
-                
+            
+            end = time.time()
             st.success(f"Detected {len(fibers)} fiber segments.")
+            st.info(f"Processing time: {end - start:.2f} seconds.")
 
     else:
         st.info("Please upload an image to start fiber analysis.")
