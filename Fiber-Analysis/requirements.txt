@@ -5,3 +5,5 @@ streamlit
 scikit-image 
 scipy 
 numpy
+pandas
+fpdf2==2.8.5
