@@ -366,7 +366,7 @@ min_object_area = st.sidebar.slider(
 )
 fiber_core_threshold = st.sidebar.slider(
     "Fiber Detection Sensitivity",
-    min_value=5, max_value=100, value=25,
+    min_value=5, max_value=100, value=30,
     help="Lower = more sensitive (detects fainter fibers), Higher = stricter"
 )
 
@@ -384,7 +384,7 @@ dist_transform_max = st.sidebar.slider(
 
 # Visualization options
 st.sidebar.subheader("📊 Display Options")
-show_noise_filter_view = st.sidebar.checkbox("Show Noise Filtering Impact", value=False)
+show_noise_filter_view = st.sidebar.checkbox("Show Noise Filtering Impact", value=True)
 show_junction_overlay = st.sidebar.checkbox("Show Junction Points", value=True)
 show_frangi_output = st.sidebar.checkbox("Show Frangi Filter Output", value=False)
 
