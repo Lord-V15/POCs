@@ -50,8 +50,53 @@ if not check_password():
 st.set_page_config(layout="wide", page_title="Fiber Analysis Pro")
 
 
+# --- INFO BAR DETECTION ---
+def detect_info_bar(gray_image, search_fraction=0.25):
+    """
+    Detect the SEM info bar at the bottom of a microscope image.
+    Scans from the bottom upward looking for a sharp horizontal intensity
+    transition that indicates the start of the info bar.
+
+    Returns the row index where the info bar starts, or the image height
+    if no bar is detected.
+    """
+    h, w = gray_image.shape
+    search_start = int(h * (1 - search_fraction))
+
+    # Compute row-wise mean intensity
+    row_means = np.mean(gray_image, axis=1).astype(np.float64)
+
+    # Compute gradient of row means (large change = edge of info bar)
+    row_gradient = np.abs(np.diff(row_means))
+
+    # Look in the bottom portion for the strongest horizontal edge
+    search_region = row_gradient[search_start:]
+    if len(search_region) == 0:
+        return h
+
+    # Use a threshold based on the gradient statistics
+    threshold = np.mean(row_gradient) + 3 * np.std(row_gradient)
+    candidates = np.where(search_region > threshold)[0]
+
+    if len(candidates) > 0:
+        # Return the topmost strong edge in the search region
+        return search_start + candidates[0]
+
+    # Fallback: check for a solid-color band at the very bottom
+    # by looking for low variance rows (text bar background)
+    row_vars = np.var(gray_image, axis=1).astype(np.float64)
+    body_var = np.mean(row_vars[:search_start])
+
+    # Scan from bottom upward for where variance returns to normal
+    for r in range(h - 1, search_start, -1):
+        if row_vars[r] > body_var * 0.3:
+            return min(r + 1, h)
+
+    return h
+
+
 # --- CORE IMAGE PROCESSING ENGINE ---
-def process_fiber_image(image_bytes, params):
+def process_fiber_image(image_bytes, params, crop_row=None):
     """
     Process fiber image with configurable parameters.
 
@@ -60,14 +105,19 @@ def process_fiber_image(image_bytes, params):
         - min_object_area: minimum area for noise filtering (default 10)
         - blob_threshold: threshold for blob identification (default 21)
         - dist_transform_max: max distance transform value (default 10)
+
+    crop_row: if set, crop the image at this row (remove everything below)
     """
     file_bytes = np.asarray(bytearray(image_bytes), dtype=np.uint8)
     img_original = cv2.imdecode(file_bytes, cv2.IMREAD_GRAYSCALE)
 
+    if crop_row is not None and crop_row < img_original.shape[0]:
+        img_original = img_original[:crop_row, :]
+
     # Extract parameters with defaults
     fiber_core_threshold = params.get('fiber_core_threshold', 20)
     min_object_area = params.get('min_object_area', 10)
-    blob_threshold = params.get('blob_threshold', 21)
+    blob_threshold = params.get('blob_threshold', 0)
     dist_transform_max = params.get('dist_transform_max', 10)
 
     # 1. Enhancement
@@ -109,8 +159,11 @@ def process_fiber_image(image_bytes, params):
     # Store skeleton after noise filtering for visualization
     skeleton_after_filter = skeleton_connected.copy()
 
-    # 5. Blob identification
-    _, blob_core = cv2.threshold(img_original, blob_threshold, 255, cv2.THRESH_BINARY)
+    # 5. Blob identification (adaptive threshold via Otsu when blob_threshold=0)
+    if blob_threshold == 0:
+        _, blob_core = cv2.threshold(img_original, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    else:
+        _, blob_core = cv2.threshold(img_original, blob_threshold, 255, cv2.THRESH_BINARY)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (6, 6))
     opened = cv2.morphologyEx(blob_core, cv2.MORPH_OPEN, kernel)
     opened = cv2.dilate(opened, kernel)
@@ -373,13 +426,26 @@ fiber_core_threshold = st.sidebar.slider(
 st.sidebar.subheader("Advanced Parameters")
 blob_threshold = st.sidebar.slider(
     "Blob Threshold",
-    min_value=5, max_value=100, value=21,
-    help="Threshold for identifying and removing blob artifacts"
+    min_value=0, max_value=100, value=0,
+    help="Threshold for identifying and removing blob artifacts. 0 = auto (Otsu's method, adapts to image brightness)"
 )
 dist_transform_max = st.sidebar.slider(
     "Max Fiber Width Detection",
     min_value=5, max_value=50, value=10,
     help="Maximum distance transform value for skeleton cleaning"
+)
+
+st.sidebar.subheader("Image Cropping")
+crop_info_bar = st.sidebar.checkbox(
+    "Crop SEM Info Bar",
+    value=True,
+    help="Auto-detect and remove the instrument info bar at the bottom of SEM images"
+)
+manual_crop_pct = st.sidebar.slider(
+    "Manual Crop (%)",
+    min_value=0, max_value=30, value=0,
+    help="Override: crop this percentage from the bottom. Set to 0 for auto-detection.",
+    disabled=not crop_info_bar,
 )
 
 # Visualization options
@@ -394,6 +460,20 @@ if uploaded_file is not None:
     with st.spinner("Analyzing fibers..."):
         start_time = time.time()
 
+        image_data = uploaded_file.read()
+
+        # Determine crop row for SEM info bar removal
+        crop_row = None
+        if crop_info_bar:
+            # Decode image to detect the info bar
+            tmp_bytes = np.asarray(bytearray(image_data), dtype=np.uint8)
+            tmp_img = cv2.imdecode(tmp_bytes, cv2.IMREAD_GRAYSCALE)
+            if manual_crop_pct > 0:
+                crop_row = int(tmp_img.shape[0] * (1 - manual_crop_pct / 100))
+            else:
+                crop_row = detect_info_bar(tmp_img)
+            st.info(f"Cropping image at row {crop_row} of {tmp_img.shape[0]} (removing bottom {tmp_img.shape[0] - crop_row}px)")
+
         # Prepare processing parameters
         processing_params = {
             'fiber_core_threshold': fiber_core_threshold,
@@ -403,14 +483,14 @@ if uploaded_file is not None:
         }
 
         skeleton_final, fibers, img_original, dist_transform, intermediate_images = process_fiber_image(
-            uploaded_file.read(), processing_params
+            image_data, processing_params, crop_row=crop_row
         )
 
         # --- OPTIONAL: Frangi Filter Output View ---
         if show_frangi_output:
             st.subheader("🔍 Frangi Filter Output")
             frangi_colored = cv2.applyColorMap(intermediate_images['frangi_output'], cv2.COLORMAP_JET)
-            st.image(frangi_colored, use_container_width=True, caption="Frangi filter response (fiber enhancement)")
+            st.image(frangi_colored, width="stretch", caption="Frangi filter response (fiber enhancement)")
 
         # --- OPTIONAL: Noise Filtering Impact View ---
         if show_noise_filter_view:
@@ -418,11 +498,11 @@ if uploaded_file is not None:
             col_before, col_after = st.columns(2)
             with col_before:
                 st.image(intermediate_images['skeleton_before_filter'],
-                         use_container_width=True,
+                         width="stretch",
                          caption="Before Noise Filtering")
             with col_after:
                 st.image(intermediate_images['skeleton_after_filter'],
-                         use_container_width=True,
+                         width="stretch",
                          caption="After Noise Filtering")
 
         # Prepare Visualizations
@@ -462,7 +542,7 @@ if uploaded_file is not None:
         st.subheader("Highlighted Fiber View" + (" with Junction Points" if show_junction_overlay else ""))
         if show_junction_overlay:
             st.caption("🟡 Yellow = Endpoints | 🔵 Cyan = Junction Points | 🟣 Magenta = Fiber Paths")
-        st.image(highlight_vis, use_container_width=True)
+        st.image(highlight_vis, width="stretch")
 
         # Data storage
         fiber_data = []
@@ -528,7 +608,7 @@ if uploaded_file is not None:
         with col1:
             st.image(
                 analysis_vis,
-                use_container_width=True,
+                width="stretch",
                 caption="Detection Visualization",
             )
         with col2:
@@ -550,7 +630,7 @@ if uploaded_file is not None:
                             "aspect_ratio",
                         ]
                     ],
-                    use_container_width=True,
+                    width="stretch",
                 )
 
             else:
@@ -580,7 +660,7 @@ if uploaded_file is not None:
                         xaxis_title="Length (px)",
                         yaxis_title="Count"
                     )
-                    st.plotly_chart(fig_length, use_container_width=True)
+                    st.plotly_chart(fig_length, width="stretch")
 
                 with viz_col2:
                     # Histogram for fiber widths
@@ -596,7 +676,7 @@ if uploaded_file is not None:
                         xaxis_title="Width (px)",
                         yaxis_title="Count"
                     )
-                    st.plotly_chart(fig_width, use_container_width=True)
+                    st.plotly_chart(fig_width, width="stretch")
 
             with viz_tab2:
                 viz_col3, viz_col4 = st.columns(2)
@@ -610,7 +690,7 @@ if uploaded_file is not None:
                         color_discrete_sequence=['#45B7D1']
                     )
                     fig_curv.update_layout(showlegend=False)
-                    st.plotly_chart(fig_curv, use_container_width=True)
+                    st.plotly_chart(fig_curv, width="stretch")
 
                 with viz_col4:
                     # Scatter plot: Length vs Curvature Rate
@@ -623,7 +703,7 @@ if uploaded_file is not None:
                         hover_data=['fiber_id', 'aspect_ratio']
                     )
                     fig_scatter.update_layout(coloraxis_colorbar_title="Width (px)")
-                    st.plotly_chart(fig_scatter, use_container_width=True)
+                    st.plotly_chart(fig_scatter, width="stretch")
 
             with viz_tab3:
                 # Comprehensive overview with subplots
@@ -662,7 +742,7 @@ if uploaded_file is not None:
                     showlegend=False,
                     title_text="Fiber Metrics Overview"
                 )
-                st.plotly_chart(fig_overview, use_container_width=True)
+                st.plotly_chart(fig_overview, width="stretch")
 
         if not df.empty:
             # Generate PDF
