@@ -8,3 +8,4 @@ numpy
 pandas
 fpdf2==2.8.5
 plotly
+base64

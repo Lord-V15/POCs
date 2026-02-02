@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import cv2
 import numpy as np
 import hmac
@@ -16,6 +17,7 @@ from datetime import datetime
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import base64
 
 # Load the .env
 load_dotenv()
@@ -285,7 +287,7 @@ class FiberReport(FPDF):
         self.cell(0, 10, f"Page {self.page_no()}", align="C")
 
 
-def create_pdf(image, df, summary, original_filename):
+def create_pdf(image, df, summary, original_filename, unit_symbol="px"):
     pdf = FiberReport()
     pdf.add_page()
 
@@ -314,17 +316,13 @@ def create_pdf(image, df, summary, original_filename):
 
     # 2. Add Summary Stats
     pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Analysis Summary (Group Averages)", ln=True)
+    pdf.cell(0, 10, f"Analysis Summary ({unit_symbol})", ln=True)
     pdf.set_font("Arial", "", 10)
 
     # Using formatting to ensure summary values are also consistent
     pdf.cell(0, 7, f"Total Fibers: {summary['Total Fibers']}", ln=True)
-    pdf.cell(
-        0, 7, f"Avg Length: {float(summary['Avg Length'].split()[0]):.3f} px", ln=True
-    )
-    pdf.cell(
-        0, 7, f"Avg Width: {float(summary['Avg Width'].split()[0]):.3f} px", ln=True
-    )
+    pdf.cell(0, 7, f"Avg Length: {summary['Avg Length']}", ln=True)
+    pdf.cell(0, 7, f"Avg Width: {summary['Avg Width']}", ln=True)
     pdf.cell(
         0, 7, f"Avg Curvature Rate: {float(summary['Avg Curvature Rate']):.3f}", ln=True
     )
@@ -334,7 +332,9 @@ def create_pdf(image, df, summary, original_filename):
 
     # 3. Add Table
     pdf.set_font("Arial", "B", 10)
-    cols = ["ID", "Length (px)", "Width (px)", "Curvature Rate", "Aspect Ratio"]
+    # Use unit symbol that's ASCII-safe for PDF (replace µ with u if needed)
+    pdf_unit = unit_symbol.replace("µ", "u")
+    cols = ["ID", f"Length ({pdf_unit})", f"Width ({pdf_unit})", "Curvature Rate", "Aspect Ratio"]
     col_widths = [15, 35, 35, 35, 35]
 
     # Header (Now guaranteed to be at the top of a new page)
@@ -342,8 +342,11 @@ def create_pdf(image, df, summary, original_filename):
         pdf.cell(col_widths[i], 10, col, border=1, align="C")
     pdf.ln()
 
-    # Rows with 3-decimal rounding
+    # Rows with 3-decimal rounding (use converted values if available)
     pdf.set_font("Arial", "", 9)
+    length_col = 'length' if 'length' in df.columns else 'length_px'
+    width_col = 'width' if 'width' in df.columns else 'width_px'
+
     for _, row in df.iterrows():
         if pdf.get_y() > 260:  # Threshold for footer safety
             pdf.add_page()
@@ -355,8 +358,8 @@ def create_pdf(image, df, summary, original_filename):
             pdf.set_font("Arial", "", 9)
 
         pdf.cell(col_widths[0], 8, str(int(row["fiber_id"])), border=1, align="C")
-        pdf.cell(col_widths[1], 8, f"{row['length_px']:.3f}", border=1, align="C")
-        pdf.cell(col_widths[2], 8, f"{row['width_px']:.3f}", border=1, align="C")
+        pdf.cell(col_widths[1], 8, f"{row[length_col]:.3f}", border=1, align="C")
+        pdf.cell(col_widths[2], 8, f"{row[width_col]:.3f}", border=1, align="C")
         pdf.cell(col_widths[3], 8, f"{row['curvature_rate']:.3f}", border=1, align="C")
         pdf.cell(col_widths[4], 8, f"{row['aspect_ratio']:.3f}", border=1, align="C")
         pdf.ln()
@@ -405,11 +408,12 @@ min_length = st.sidebar.slider(
     min_value=5, max_value=200, value=15,
     help="Minimum length to consider a fiber valid"
 )
-max_length = st.sidebar.slider(
-    "Max Fiber Length (px)",
-    min_value=50, max_value=2000, value=1000,
-    help="Maximum length to consider a fiber valid (filters out artifacts)"
-)
+max_length = 1000
+#   st.sidebar.slider(
+#     "Max Fiber Length (px)",
+#     min_value=50, max_value=2000, value=1000,
+#     help="Maximum length to consider a fiber valid (filters out artifacts)"
+# )
 
 st.sidebar.subheader("Noise Filtering")
 min_object_area = st.sidebar.slider(
@@ -427,7 +431,7 @@ st.sidebar.subheader("Advanced Parameters")
 blob_threshold = st.sidebar.slider(
     "Blob Threshold",
     min_value=0, max_value=100, value=0,
-    help="Threshold for identifying and removing blob artifacts. 0 = auto (Otsu's method, adapts to image brightness)"
+    help="Threshold for identifying and removing blob artifacts. 0 = auto"
 )
 dist_transform_max = st.sidebar.slider(
     "Max Fiber Width Detection",
@@ -452,7 +456,56 @@ manual_crop_pct = st.sidebar.slider(
 st.sidebar.subheader("📊 Display Options")
 show_noise_filter_view = st.sidebar.checkbox("Show Noise Filtering Impact", value=True)
 show_junction_overlay = st.sidebar.checkbox("Show Junction Points", value=True)
-show_frangi_output = st.sidebar.checkbox("Show Frangi Filter Output", value=False)
+# show_frangi_output = st.sidebar.checkbox("Show Frangi Filter Output", value=False)
+
+# Unit conversion settings
+st.sidebar.subheader("📏 Unit Settings")
+unit_options = {
+    "px": {"name": "Pixels", "symbol": "px", "factor": 1.0},
+    "µm": {"name": "Micrometers", "symbol": "µm", "factor": 1.0},
+    "nm": {"name": "Nanometers", "symbol": "nm", "factor": 1000.0},  # 1 µm = 1000 nm
+    "mm": {"name": "Millimeters", "symbol": "mm", "factor": 0.001},  # 1 µm = 0.001 mm
+}
+selected_unit = st.sidebar.selectbox(
+    "Display Unit",
+    options=list(unit_options.keys()),
+    format_func=lambda x: f"{unit_options[x]['name']} ({unit_options[x]['symbol']})",
+    help="Select the unit for displaying measurements"
+)
+
+# Scale input (only shown when not using pixels)
+if selected_unit != "px":
+    scale_input_mode = st.sidebar.radio(
+        "Scale Input Mode",
+        options=["px per µm", "µm per px"],
+        help="Choose how to input the scale factor"
+    )
+    if scale_input_mode == "px per µm":
+        px_per_um = st.sidebar.number_input(
+            "Pixels per Micrometer",
+            min_value=0.001, max_value=1000.0, value=1.0, step=0.1,
+            help="Number of pixels that equal 1 micrometer (from SEM scale bar)"
+        )
+        um_per_px = 1.0 / px_per_um
+    else:
+        um_per_px = st.sidebar.number_input(
+            "Micrometers per Pixel",
+            min_value=0.001, max_value=1000.0, value=1.0, step=0.1,
+            help="Size of one pixel in micrometers (from SEM scale bar)"
+        )
+    # Convert to selected unit
+    unit_factor = um_per_px * unit_options[selected_unit]['factor']
+    unit_symbol = unit_options[selected_unit]['symbol']
+else:
+    unit_factor = 1.0
+    unit_symbol = "px"
+
+
+def format_measurement(value_px, decimals=2):
+    """Convert pixel measurement to selected unit and format."""
+    converted = value_px * unit_factor
+    return f"{converted:.{decimals}f} {unit_symbol}"
+
 
 uploaded_file = st.file_uploader("Upload fiber image", type=["jpg", "jpeg", "png"])
 
@@ -487,10 +540,10 @@ if uploaded_file is not None:
         )
 
         # --- OPTIONAL: Frangi Filter Output View ---
-        if show_frangi_output:
-            st.subheader("🔍 Frangi Filter Output")
-            frangi_colored = cv2.applyColorMap(intermediate_images['frangi_output'], cv2.COLORMAP_JET)
-            st.image(frangi_colored, width="stretch", caption="Frangi filter response (fiber enhancement)")
+        # if show_frangi_output:
+        #     st.subheader("🔍 Frangi Filter Output")
+        #     frangi_colored = cv2.applyColorMap(intermediate_images['frangi_output'], cv2.COLORMAP_JET)
+        #     st.image(frangi_colored, use_container_width=True, caption="Frangi filter response (fiber enhancement)")
 
         # --- OPTIONAL: Noise Filtering Impact View ---
         if show_noise_filter_view:
@@ -498,11 +551,11 @@ if uploaded_file is not None:
             col_before, col_after = st.columns(2)
             with col_before:
                 st.image(intermediate_images['skeleton_before_filter'],
-                         width="stretch",
+                         use_container_width=True,
                          caption="Before Noise Filtering")
             with col_after:
                 st.image(intermediate_images['skeleton_after_filter'],
-                         width="stretch",
+                         use_container_width=True,
                          caption="After Noise Filtering")
 
         # Prepare Visualizations
@@ -538,14 +591,12 @@ if uploaded_file is not None:
             for y, x in zip(*np.where(endpoints)):
                 cv2.circle(highlight_vis, (x, y), 2, (0, 255, 255), -1)  # Yellow for endpoints
 
-        # Display Results
-        st.subheader("Highlighted Fiber View" + (" with Junction Points" if show_junction_overlay else ""))
-        if show_junction_overlay:
-            st.caption("🟡 Yellow = Endpoints | 🔵 Cyan = Junction Points | 🟣 Magenta = Fiber Paths")
-        st.image(highlight_vis, width="stretch")
+        # Note: The highlighted fiber view is now shown below as an interactive Plotly chart
+        # with hover metrics. The static view with junction points is preserved in highlight_vis.
 
         # Data storage
         fiber_data = []
+        valid_fibers = []  # Store valid fiber paths with their stats
         img_bgr = cv2.cvtColor(img_original, cv2.COLOR_GRAY2BGR)
         analysis_vis = img_bgr.copy()
 
@@ -559,6 +610,7 @@ if uploaded_file is not None:
             stats["fiber_id"] = fiber_id_counter
             fiber_id_counter += 1
             fiber_data.append(stats)
+            valid_fibers.append({'path': path, 'stats': stats})
             ys, xs = [p[0] for p in path], [p[1] for p in path]
             cv2.rectangle(
                 analysis_vis,
@@ -581,23 +633,27 @@ if uploaded_file is not None:
 
         # --- SUMMARY METRICS DISPLAY ON WEBSITE ---
         if not df.empty:
-            st.subheader("📊 Analysis Summary")
+            # Add converted columns to dataframe
+            df['length'] = df['length_px'] * unit_factor
+            df['width'] = df['width_px'] * unit_factor
+
+            st.subheader(f"📊 Analysis Summary ({unit_symbol})")
             metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
             with metric_col1:
                 st.metric("Total Fibers", len(df))
             with metric_col2:
-                st.metric("Avg Length", f"{df['length_px'].mean():.2f} px")
+                st.metric("Avg Length", format_measurement(df['length_px'].mean()))
             with metric_col3:
-                st.metric("Avg Width", f"{df['width_px'].mean():.2f} px")
+                st.metric("Avg Width", format_measurement(df['width_px'].mean()))
             with metric_col4:
                 st.metric("Avg Curvature Rate", f"{df['curvature_rate'].mean():.3f}")
 
             # Additional stats row
             stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
             with stat_col1:
-                st.metric("Min Length", f"{df['length_px'].min():.2f} px")
+                st.metric("Min Length", format_measurement(df['length_px'].min()))
             with stat_col2:
-                st.metric("Max Length", f"{df['length_px'].max():.2f} px")
+                st.metric("Max Length", format_measurement(df['length_px'].max()))
             with stat_col3:
                 st.metric("Avg Aspect Ratio", f"{df['aspect_ratio'].mean():.2f}")
             with stat_col4:
@@ -606,35 +662,179 @@ if uploaded_file is not None:
 
         col1, col2 = st.columns([2, 1])
         with col1:
-            st.image(
-                analysis_vis,
-                width="stretch",
-                caption="Detection Visualization",
-            )
+            # Interactive highlighted fiber view with hover metrics
+            if not df.empty and valid_fibers:
+                # Create Plotly figure with the highlighted image as background
+                img_rgb = cv2.cvtColor(highlight_vis, cv2.COLOR_BGR2RGB)
+                img_height, img_width = img_rgb.shape[:2]
+
+                # Encode image as base64 PNG for use as background
+                _, img_encoded = cv2.imencode('.png', highlight_vis)
+                img_base64 = base64.b64encode(img_encoded).decode('utf-8')
+
+                fig_interactive = go.Figure()
+
+                # Add scatter traces for each fiber with hover interaction
+                for fiber_info in valid_fibers:
+                    path = fiber_info['path']
+                    stats = fiber_info['stats']
+
+                    # Get all points along the fiber path
+                    xs = [p[1] for p in path]
+                    ys = [p[0] for p in path]
+
+                    # Create hover text with converted units
+                    hover_text = (
+                        f"<b>Fiber #{stats['fiber_id']}</b><br>"
+                        f"Length: {format_measurement(stats['length_px'])}<br>"
+                        # f"Width: {format_measurement(stats['width_px'])}<br>"
+                        # f"Curvature: {stats['curvature_rate']:.3f}<br>"
+                        # f"Aspect Ratio: {stats['aspect_ratio']:.2f}"
+                    )
+
+                    # Add invisible wide line for hover detection - becomes visible on hover via JS
+                    fig_interactive.add_trace(go.Scatter(
+                        x=xs,
+                        y=ys,
+                        mode='lines',
+                        line=dict(color='cyan', width=6),
+                        opacity=0,  # Start invisible, JS will show on hover
+                        hoverinfo='text',
+                        hovertext=hover_text,
+                        hoverlabel=dict(
+                            bgcolor='rgba(0, 0, 0, 0.85)',
+                            font_size=13,
+                            font_color='white',
+                            bordercolor='cyan'
+                        ),
+                        name=f'Fiber {stats["fiber_id"]}',
+                        showlegend=False,
+                    ))
+
+                # Update layout with image as background
+                fig_interactive.update_layout(
+                    xaxis=dict(
+                        showgrid=False,
+                        zeroline=False,
+                        showticklabels=False,
+                        range=[0, img_width],
+                    ),
+                    yaxis=dict(
+                        showgrid=False,
+                        zeroline=False,
+                        showticklabels=False,
+                        range=[img_height, 0],  # Flip y-axis for image coordinates
+                        scaleanchor='x',
+                    ),
+                    images=[dict(
+                        source=f'data:image/png;base64,{img_base64}',
+                        xref='x',
+                        yref='y',
+                        x=0,
+                        y=0,
+                        sizex=img_width,
+                        sizey=img_height,
+                        sizing='stretch',
+                        layer='below'
+                    )],
+                    margin=dict(l=0, r=0, t=30, b=0),
+                    hovermode='closest',
+                    height=500,
+                    plot_bgcolor='rgba(0,0,0,0)',
+                )
+
+                # Update hover traces to highlight on hover
+                fig_interactive.update_traces(
+                    selector=dict(mode='lines'),
+                    hoverlabel=dict(namelength=-1)
+                )
+
+                # Convert figure to JSON for custom HTML rendering with hover highlight
+                fig_json = fig_interactive.to_json()
+
+                # Custom HTML with JavaScript for hover highlighting
+                html_content = f"""
+                <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+                <div id="fiber-plot" style="width:100%; height:500px;"></div>
+                <script>
+                    var figData = {fig_json};
+                    var plotDiv = document.getElementById('fiber-plot');
+
+                    Plotly.newPlot(plotDiv, figData.data, figData.layout, {{
+                        displayModeBar: true,
+                        modeBarButtonsToRemove: ['lasso2d', 'select2d']
+                    }});
+
+                    // Track last hovered trace to reset it
+                    var lastHoveredTrace = null;
+
+                    plotDiv.on('plotly_hover', function(data) {{
+                        var traceIndex = data.points[0].curveNumber;
+
+                        // Reset previous trace if different
+                        if (lastHoveredTrace !== null && lastHoveredTrace !== traceIndex) {{
+                            Plotly.restyle(plotDiv, {{'opacity': 0}}, [lastHoveredTrace]);
+                        }}
+
+                        // Highlight current trace with cyan outline
+                        Plotly.restyle(plotDiv, {{'opacity': 0.9}}, [traceIndex]);
+                        lastHoveredTrace = traceIndex;
+                    }});
+
+                    plotDiv.on('plotly_unhover', function(data) {{
+                        if (lastHoveredTrace !== null) {{
+                            Plotly.restyle(plotDiv, {{'opacity': 0}}, [lastHoveredTrace]);
+                            lastHoveredTrace = null;
+                        }}
+                    }});
+                </script>
+                """
+
+                components.html(html_content, height=520)
+
+                if show_junction_overlay:
+                    st.caption("🖱️ Hover over fibers to see metrics | 🟡 Yellow = Endpoints | 🔵 Cyan = Junction Points")
+                else:
+                    st.caption("🖱️ Hover over fibers to see metrics (fiber number, length, width, curvature)")
+            else:
+                st.image(
+                    highlight_vis,
+                    use_container_width=True,
+                    caption="Highlighted Fiber View",
+                )
         with col2:
             if not df.empty:
                 summary = {
                     "Total Fibers": len(df),
-                    "Avg Length": f"{df['length_px'].mean():.2f} px",
-                    "Avg Width": f"{df['width_px'].mean():.2f} px",
+                    "Avg Length": format_measurement(df['length_px'].mean()),
+                    "Avg Width": format_measurement(df['width_px'].mean()),
                     "Avg Curvature Rate": f"{df['curvature_rate'].mean():.3f}",
                 }
-                st.subheader("Detailed Metrics")
+                st.subheader(f"Detailed Metrics ({unit_symbol})")
+                # Create display dataframe with converted units
+                display_df = df[["fiber_id", "length", "width", "curvature_rate", "aspect_ratio"]].copy()
+                display_df.columns = [
+                    "Fiber ID",
+                    f"Length ({unit_symbol})",
+                    f"Width ({unit_symbol})",
+                    "Curvature Rate",
+                    "Aspect Ratio"
+                ]
                 st.dataframe(
-                    df[
-                        [
-                            "fiber_id",
-                            "length_px",
-                            "width_px",
-                            "curvature_rate",
-                            "aspect_ratio",
-                        ]
-                    ],
-                    width="stretch",
+                    display_df.round(3),
+                    use_container_width=True,
                 )
 
             else:
                 st.warning("No fibers detected.")
+
+        # Bounding box detection visualization (moved below)
+        st.subheader("Detection Visualization")
+        st.image(
+            analysis_vis,
+            use_container_width=True,
+            caption="Fiber Detection with Bounding Boxes and IDs",
+        )
 
         # --- METRIC VISUALIZATIONS ---
         if not df.empty:
@@ -649,34 +849,34 @@ if uploaded_file is not None:
                 with viz_col1:
                     # Histogram for fiber lengths
                     fig_length = px.histogram(
-                        df, x='length_px',
+                        df, x='length',
                         nbins=20,
                         title='Fiber Length Distribution',
-                        labels={'length_px': 'Length (px)', 'count': 'Count'},
+                        labels={'length': f'Length ({unit_symbol})', 'count': 'Count'},
                         color_discrete_sequence=['#FF6B6B']
                     )
                     fig_length.update_layout(
                         showlegend=False,
-                        xaxis_title="Length (px)",
+                        xaxis_title=f"Length ({unit_symbol})",
                         yaxis_title="Count"
                     )
-                    st.plotly_chart(fig_length, width="stretch")
+                    st.plotly_chart(fig_length, use_container_width=True)
 
                 with viz_col2:
                     # Histogram for fiber widths
                     fig_width = px.histogram(
-                        df, x='width_px',
+                        df, x='width',
                         nbins=20,
                         title='Fiber Width Distribution',
-                        labels={'width_px': 'Width (px)', 'count': 'Count'},
+                        labels={'width': f'Width ({unit_symbol})', 'count': 'Count'},
                         color_discrete_sequence=['#4ECDC4']
                     )
                     fig_width.update_layout(
                         showlegend=False,
-                        xaxis_title="Width (px)",
+                        xaxis_title=f"Width ({unit_symbol})",
                         yaxis_title="Count"
                     )
-                    st.plotly_chart(fig_width, width="stretch")
+                    st.plotly_chart(fig_width, use_container_width=True)
 
             with viz_tab2:
                 viz_col3, viz_col4 = st.columns(2)
@@ -690,38 +890,38 @@ if uploaded_file is not None:
                         color_discrete_sequence=['#45B7D1']
                     )
                     fig_curv.update_layout(showlegend=False)
-                    st.plotly_chart(fig_curv, width="stretch")
+                    st.plotly_chart(fig_curv, use_container_width=True)
 
                 with viz_col4:
                     # Scatter plot: Length vs Curvature Rate
                     fig_scatter = px.scatter(
-                        df, x='length_px', y='curvature_rate',
+                        df, x='length', y='curvature_rate',
                         title='Length vs Curvature Rate',
-                        labels={'length_px': 'Length (px)', 'curvature_rate': 'Curvature Rate'},
-                        color='width_px',
+                        labels={'length': f'Length ({unit_symbol})', 'curvature_rate': 'Curvature Rate'},
+                        color='width',
                         color_continuous_scale='Viridis',
                         hover_data=['fiber_id', 'aspect_ratio']
                     )
-                    fig_scatter.update_layout(coloraxis_colorbar_title="Width (px)")
-                    st.plotly_chart(fig_scatter, width="stretch")
+                    fig_scatter.update_layout(coloraxis_colorbar_title=f"Width ({unit_symbol})")
+                    st.plotly_chart(fig_scatter, use_container_width=True)
 
             with viz_tab3:
                 # Comprehensive overview with subplots
                 fig_overview = make_subplots(
                     rows=2, cols=2,
-                    subplot_titles=('Length Distribution', 'Width Distribution',
+                    subplot_titles=(f'Length Distribution ({unit_symbol})', f'Width Distribution ({unit_symbol})',
                                     'Aspect Ratio Distribution', 'Curvature Rate Histogram')
                 )
 
                 # Length histogram
                 fig_overview.add_trace(
-                    go.Histogram(x=df['length_px'], name='Length', marker_color='#FF6B6B', nbinsx=15),
+                    go.Histogram(x=df['length'], name='Length', marker_color='#FF6B6B', nbinsx=15),
                     row=1, col=1
                 )
 
                 # Width histogram
                 fig_overview.add_trace(
-                    go.Histogram(x=df['width_px'], name='Width', marker_color='#4ECDC4', nbinsx=15),
+                    go.Histogram(x=df['width'], name='Width', marker_color='#4ECDC4', nbinsx=15),
                     row=1, col=2
                 )
 
@@ -742,11 +942,11 @@ if uploaded_file is not None:
                     showlegend=False,
                     title_text="Fiber Metrics Overview"
                 )
-                st.plotly_chart(fig_overview, width="stretch")
+                st.plotly_chart(fig_overview, use_container_width=True)
 
         if not df.empty:
             # Generate PDF
-            raw_pdf = create_pdf(analysis_vis, df, summary, uploaded_file.name)
+            raw_pdf = create_pdf(analysis_vis, df, summary, uploaded_file.name, unit_symbol)
             pdf_bytes = bytes(raw_pdf)  # The crucial conversion
 
             st.download_button(
